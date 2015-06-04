@@ -1,0 +1,36 @@
+diff -urN graphchi-cpp-ori/Makefile graphchi-cpp/Makefile
+--- graphchi-cpp-ori/Makefile	2015-06-03 23:30:58.000000000 +0800
++++ graphchi-cpp/Makefile	2015-06-04 01:28:04.000000000 +0800
+@@ -1,14 +1,14 @@
+ INCFLAGS = -I/usr/local/include/ -I./src/
+ 
+ CPP = g++
+-CPPFLAGS = -g -O3 $(INCFLAGS)  -fopenmp -Wall -Wno-strict-aliasing 
+-LINKERFLAGS = -lz
++CPPFLAGS = -g -O3 $(INCFLAGS)  -fopenmp -Wall -Wno-strict-aliasing --std=c++11
++LINKERFLAGS = -lz -latomic
+ DEBUGFLAGS = -g -ggdb $(INCFLAGS)
+ HEADERS=$(shell find . -name '*.hpp')
+ 
+ 
+-all: apps tests 
+-apps: example_apps/connectedcomponents example_apps/pagerank example_apps/pagerank_functional example_apps/communitydetection example_apps/unionfind_connectedcomps example_apps/stronglyconnectedcomponents example_apps/trianglecounting example_apps/randomwalks example_apps/minimumspanningforest
++all: apps 
++apps: example_apps/sssp_sched example_apps/pagerank_converge example_apps/bfs example_apps/connectedcomponents 
+ als: example_apps/matrix_factorization/als_edgefactors  example_apps/matrix_factorization/als_vertices_inmem
+ tests: tests/basic_smoketest tests/bulksync_functional_test tests/dynamicdata_smoketest tests/test_dynamicedata_loader
+ 
+@@ -66,6 +66,13 @@
+ docs: */**
+ 	doxygen conf/doxygen/doxygen.config
+ 
++cscope:
++	find ./ -name *.cpp > cscope.files
++	find ./ -name *.c >> cscope.files
++	find ./ -name *.h >> cscope.files
++	find ./ -name *.hpp >> cscope.files
++	cscope -bqk
++
+ 
+ 	
+ 

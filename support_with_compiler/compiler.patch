@@ -1,0 +1,870 @@
+diff -urN graphchi-cpp-ori/Makefile graphchi-cpp/Makefile
+--- graphchi-cpp-ori/Makefile	2015-06-03 23:30:58.000000000 +0800
++++ graphchi-cpp/Makefile	2015-06-04 07:39:49.000000000 +0800
+@@ -1,16 +1,23 @@
+ INCFLAGS = -I/usr/local/include/ -I./src/
+ 
+ CPP = g++
+-CPPFLAGS = -g -O3 $(INCFLAGS)  -fopenmp -Wall -Wno-strict-aliasing 
+-LINKERFLAGS = -lz
++CPPFLAGS = -g -O3 $(INCFLAGS)  -fopenmp -Wall -Wno-strict-aliasing --std=c++11
++LINKERFLAGS = -lz -latomic
+ DEBUGFLAGS = -g -ggdb $(INCFLAGS)
+ HEADERS=$(shell find . -name '*.hpp')
+ 
+ 
+-all: apps tests 
+-apps: example_apps/connectedcomponents example_apps/pagerank example_apps/pagerank_functional example_apps/communitydetection example_apps/unionfind_connectedcomps example_apps/stronglyconnectedcomponents example_apps/trianglecounting example_apps/randomwalks example_apps/minimumspanningforest
+-als: example_apps/matrix_factorization/als_edgefactors  example_apps/matrix_factorization/als_vertices_inmem
+-tests: tests/basic_smoketest tests/bulksync_functional_test tests/dynamicdata_smoketest tests/test_dynamicedata_loader
++all: apps 
++#tests 
++#apps: example_apps/sssp_sched_member_atomic 
++#apps: example_apps/bfs 
++#apps:  example_apps/sssp_sched_struct_atomic 
++apps: example_apps/sssp_sched example_apps/pagerank_converge example_apps/bfs example_apps/connectedcomponents 
++# example_apps/connectedcomponents example_apps/pagerank_converge example_apps/sssp_sched example_apps/bfs 
++	#example_apps/sssp_sched  example_apps/inmemsssp_sched example_apps/pagerank_converge example_apps/wcc example_apps/connectedcomponents 
++	# example_apps/inmemsssp   example_apps/pagerank example_apps/pagerank_hl  example_apps/stronglyconnectedcomponents example_apps/trianglecounting example_apps/randomwalks example_apps/minimumspanningforest
++#als: example_apps/matrix_factorization/als_edgefactors  example_apps/matrix_factorization/als_vertices_inmem
++#tests: tests/basic_smoketest tests/bulksync_functional_test tests/dynamicdata_smoketest tests/test_dynamicedata_loader
+ 
+ echo:
+ 	echo $(HEADERS)
+@@ -66,6 +73,13 @@
+ docs: */**
+ 	doxygen conf/doxygen/doxygen.config
+ 
++cscope:
++	find ./ -name *.cpp > cscope.files
++	find ./ -name *.c >> cscope.files
++	find ./ -name *.h >> cscope.files
++	find ./ -name *.hpp >> cscope.files
++	cscope -bqk
++
+ 
+ 	
+ 
+diff -urN graphchi-cpp-ori/src/api/graphchi_program.hpp graphchi-cpp/src/api/graphchi_program.hpp
+--- graphchi-cpp-ori/src/api/graphchi_program.hpp	2015-06-03 23:30:59.000000000 +0800
++++ graphchi-cpp/src/api/graphchi_program.hpp	2015-06-04 07:44:13.000000000 +0800
+@@ -37,13 +37,14 @@
+ 
+ namespace graphchi {
+     
+-    template <typename VertexDataType_, typename EdgeDataType_,
+-                typename vertex_t = graphchi_vertex<VertexDataType_, EdgeDataType_> >
++    template <typename VertexDataType_, typename EdgeDataType_,typename PreEdgeDataType_,
++                typename vertex_t = graphchi_vertex<VertexDataType_, EdgeDataType_,PreEdgeDataType_> >
+     class GraphChiProgram {
+         
+     public:
+         typedef VertexDataType_ VertexDataType;
+         typedef EdgeDataType_ EdgeDataType;
++        typedef PreEdgeDataType_ PreEdgeDataType;
+         
+         virtual ~GraphChiProgram() {}
+         
+diff -urN graphchi-cpp-ori/src/api/graph_objects.hpp graphchi-cpp/src/api/graph_objects.hpp
+--- graphchi-cpp-ori/src/api/graph_objects.hpp	2015-06-03 23:30:59.000000000 +0800
++++ graphchi-cpp/src/api/graph_objects.hpp	2015-06-04 07:44:13.000000000 +0800
+@@ -31,6 +31,7 @@
+ #define DEF_GRAPHCHI_OBJECTS
+ 
+ #include <vector>
++#include <atomic>
+ #include <assert.h>
+ #include <omp.h>
+ #include <string.h>
+@@ -52,24 +53,31 @@
+     
+     
+     
+-    template <typename EdgeDataType>
++    template <typename EdgeDataType, typename PreEdgeDataType>
+     class graphchi_edge {
+         
+     public:
+         vid_t vertexid; // Source or Target vertex id. Clear from context.
+-        EdgeDataType * data_ptr;
++        EdgeDataType *  data_ptr;
+         
+         graphchi_edge() {}
+         graphchi_edge(vid_t _vertexid, EdgeDataType * edata_ptr) : vertexid(_vertexid), data_ptr(edata_ptr) {
+         }
+         
+ #ifndef DYNAMICEDATA
+-        EdgeDataType get_data() {
+-            return * data_ptr;
++        PreEdgeDataType get_data() {
++            //PreEdgeDataType value = (*data_ptr).load(std::memory_order_relaxed);
++            PreEdgeDataType value = (*data_ptr).load(std::memory_order_relaxed);
++			return value;
++        }
++
++		/* hl code */
++        EdgeDataType * get_data_ptr() {
++            return  data_ptr;
+         }
+         
+-        void set_data(EdgeDataType x) {
+-            *data_ptr = x;
++        void set_data(PreEdgeDataType x) {
++            (*data_ptr).store(x,std::memory_order_relaxed);
+         }
+ #else 
+         EdgeDataType * get_vector() {  // EdgeDataType is a chivector
+@@ -87,8 +95,9 @@
+  
+     }  __attribute__((packed));
+     
+-    template <typename ET>
+-    bool eptr_less(const graphchi_edge<ET> &a, const graphchi_edge<ET> &b) {
++	/*hl tmp*/
++    template <typename ET, typename PreET>
++    bool eptr_less(const graphchi_edge<ET,PreET> &a, const graphchi_edge<ET,PreET> &b) {
+         return a.vertexid < b.vertexid;
+     }
+     
+@@ -103,6 +112,7 @@
+      */
+     
+     // This is hacky...
++	/* hl code
+     static inline bool VARIABLE_IS_NOT_USED is_deleted_edge_value(int val);
+     static inline bool VARIABLE_IS_NOT_USED is_deleted_edge_value(bool val) {
+         return val;
+@@ -123,7 +133,7 @@
+     static inline bool VARIABLE_IS_NOT_USED is_deleted_edge_value(float val) {
+         return !(val < 0 || val > 0);
+     }
+-    
++
+     static void VARIABLE_IS_NOT_USED remove_edgev(graphchi_edge<bool> * e);
+     static void VARIABLE_IS_NOT_USED remove_edgev(graphchi_edge<bool> * e) {
+         e->set_data(true);
+@@ -138,11 +148,11 @@
+     static void VARIABLE_IS_NOT_USED remove_edgev(graphchi_edge<int> * e) {
+         e->set_data(0xffffffff);
+     }
+-    
++    */
+ #endif  
+     
+     
+-    template <typename VertexDataType, typename EdgeDataType>
++    template <typename VertexDataType, typename EdgeDataType, typename PreEdgeDataType>
+     class internal_graphchi_vertex {
+         
+     public:   // Todo, use friend
+@@ -152,13 +162,13 @@
+         vid_t vertexid;
+ 
+     protected:
+-        graphchi_edge<EdgeDataType> * inedges_ptr;
+-        graphchi_edge<EdgeDataType> * outedges_ptr;
++        graphchi_edge<EdgeDataType,PreEdgeDataType> * inedges_ptr;
++        graphchi_edge<EdgeDataType,PreEdgeDataType> * outedges_ptr;
+         
+                 
+     public:
+         bool modified;
+-        VertexDataType * dataptr;
++        VertexDataType * volatile dataptr;
+ 
+ 
+         /* Accessed directly by the engine */
+@@ -179,8 +189,8 @@
+         }
+         
+         
+-        internal_graphchi_vertex(vid_t _id, graphchi_edge<EdgeDataType> * iptr, 
+-                                graphchi_edge<EdgeDataType> * optr, 
++        internal_graphchi_vertex(vid_t _id, graphchi_edge<EdgeDataType,PreEdgeDataType> * iptr, 
++                                graphchi_edge<EdgeDataType,PreEdgeDataType> * optr, 
+                                  int indeg, 
+                                  int outdeg) : 
+                             vertexid(_id), inedges_ptr(iptr), outedges_ptr(optr) {
+@@ -228,7 +238,7 @@
+ #endif
+             int i = __sync_add_and_fetch(&inc, 1);
+             if (inedges_ptr != NULL)
+-                inedges_ptr[i - 1] = graphchi_edge<EdgeDataType>(src, ptr);
++                inedges_ptr[i - 1] = graphchi_edge<EdgeDataType,PreEdgeDataType>(src, ptr);
+             
+             assert(src != vertexid);
+           /*  if(inedges_ptr != NULL && inc > outedges_ptr - inedges_ptr) {
+@@ -245,26 +255,26 @@
+             }
+ #endif
+             int i = __sync_add_and_fetch(&outc, 1);
+-            if (outedges_ptr != NULL) outedges_ptr[i - 1] = graphchi_edge<EdgeDataType>(dst, ptr);
++            if (outedges_ptr != NULL) outedges_ptr[i - 1] = graphchi_edge<EdgeDataType,PreEdgeDataType>(dst, ptr);
+             assert(dst != vertexid);
+         }
+         
+         
+     };
+     
+-    template <typename VertexDataType, typename EdgeDataType >
+-    class graphchi_vertex : public internal_graphchi_vertex<VertexDataType, EdgeDataType> {
++    template <typename VertexDataType, typename EdgeDataType, typename PreEdgeDataType >
++    class graphchi_vertex : public internal_graphchi_vertex<VertexDataType, EdgeDataType, PreEdgeDataType> {
+         
+     public:
+         
+-        graphchi_vertex() : internal_graphchi_vertex<VertexDataType, EdgeDataType>() { }
++        graphchi_vertex() : internal_graphchi_vertex<VertexDataType, EdgeDataType, PreEdgeDataType>() { }
+         
+         graphchi_vertex(vid_t _id, 
+-                        graphchi_edge<EdgeDataType> * iptr, 
+-                                 graphchi_edge<EdgeDataType> * optr, 
++                        graphchi_edge<EdgeDataType,PreEdgeDataType> * iptr, 
++                                 graphchi_edge<EdgeDataType,PreEdgeDataType> * optr, 
+                         int indeg, 
+                         int outdeg) : 
+-            internal_graphchi_vertex<VertexDataType, EdgeDataType>(_id, iptr, optr, indeg, outdeg) {}
++            internal_graphchi_vertex<VertexDataType, EdgeDataType, PreEdgeDataType>(_id, iptr, optr, indeg, outdeg) {}
+         
+         virtual ~graphchi_vertex() {}
+         
+@@ -272,23 +282,23 @@
+           * Returns ith edge of a vertex, ignoring 
+           * edge direction.
+           */
+-        graphchi_edge<EdgeDataType> * edge(int i) {
++        graphchi_edge<EdgeDataType,PreEdgeDataType> * edge(int i) {
+             if (i < this->inc) return inedge(i);
+             else return outedge(i - this->inc);
+         }
+ 
+         
+-        graphchi_edge<EdgeDataType> * inedge(int i) {
++        graphchi_edge<EdgeDataType,PreEdgeDataType> * inedge(int i) {
+             assert(i >= 0 && i < this->inc);
+             return &this->inedges_ptr[i];
+         }
+         
+-        graphchi_edge<EdgeDataType> * outedge(int i) {
++        graphchi_edge<EdgeDataType,PreEdgeDataType> * outedge(int i) {
+             assert(i >= 0 && i < this->outc);
+             return &this->outedges_ptr[i];
+         }        
+         
+-        graphchi_edge<EdgeDataType> * random_outedge() {
++        graphchi_edge<EdgeDataType,PreEdgeDataType> * random_outedge() {
+             if (this->outc == 0) return NULL;
+             return outedge((int) (std::abs(random()) % this->outc));
+         }
+@@ -335,10 +345,10 @@
+             // Check for deleted edges first...
+             if (this->inc != (this->outedges_ptr - this->inedges_ptr)) {
+                 // Moving
+-                memmove(&this->inedges_ptr[this->inc], this->outedges_ptr, this->outc * sizeof(graphchi_edge<EdgeDataType>));
++                memmove(&this->inedges_ptr[this->inc], this->outedges_ptr, this->outc * sizeof(graphchi_edge<EdgeDataType,PreEdgeDataType>));
+                 this->outedges_ptr = &this->inedges_ptr[this->inc];
+             }
+-            quickSort(this->inedges_ptr, (int) (this->inc + this->outc), eptr_less<EdgeDataType>);
++            quickSort(this->inedges_ptr, (int) (this->inc + this->outc), eptr_less<EdgeDataType,PreEdgeDataType>);
+             
+         }
+         
+diff -urN graphchi-cpp-ori/src/engine/graphchi_engine.hpp graphchi-cpp/src/engine/graphchi_engine.hpp
+--- graphchi-cpp-ori/src/engine/graphchi_engine.hpp	2015-06-03 23:30:59.000000000 +0800
++++ graphchi-cpp/src/engine/graphchi_engine.hpp	2015-06-04 07:44:13.000000000 +0800
+@@ -59,8 +59,8 @@
+ namespace graphchi {
+     
+     
+-    template <typename VertexDataType, typename EdgeDataType,
+-    typename svertex_t = graphchi_vertex<VertexDataType, EdgeDataType> >
++    template <typename VertexDataType, typename EdgeDataType,typename PreEdgeDataType,
++    typename svertex_t = graphchi_vertex<VertexDataType, EdgeDataType,PreEdgeDataType> >
+     
+     class graphchi_engine {
+     public:     
+@@ -320,7 +320,7 @@
+                     int outc = deg.outdegree * (!disable_outedges);
+                     
+                     // Raw data and object cost included
+-                    memreq += sizeof(svertex_t) + (sizeof(EdgeDataType) + sizeof(vid_t) + sizeof(graphchi_edge<EdgeDataType>))*(outc + inc);
++                    memreq += sizeof(svertex_t) + (sizeof(EdgeDataType) + sizeof(vid_t) + sizeof(graphchi_edge<EdgeDataType,PreEdgeDataType>))*(outc + inc);
+                     if (memreq > membudget) {
+                         logstream(LOG_DEBUG) << "Memory budget exceeded with " << memreq << " bytes." << std::endl;
+                         return fromvid + i - 1;  // Previous was enough
+@@ -393,10 +393,15 @@
+             iomgr->wait_for_reads();
+         }
+         
+-        virtual void exec_updates(GraphChiProgram<VertexDataType, EdgeDataType, svertex_t> &userprogram,
++        virtual void exec_updates(GraphChiProgram<VertexDataType, EdgeDataType,PreEdgeDataType, svertex_t> &userprogram,
+                           std::vector<svertex_t> &vertices) {
+             metrics_entry me = m.start_time();
+             size_t nvertices = vertices.size();
++			//added by Szy to test the effects
++//			if( enable_deterministic_parallelism ) printf( "enable_deterministic_parallelism = TRUE\n" );
++//			enable_deterministic_parallelism = false;
++			//added by Szy to test the effects
++
+             if (!enable_deterministic_parallelism) {
+                 for(int i=0; i < (int)nvertices; i++) vertices[i].parallel_safe = true;
+             }
+@@ -411,12 +416,23 @@
+              
+             do {
+                 omp_set_num_threads(exec_threads);
+-                
++         //       int hl_m = 0;
++	/*	omp_sched_t hl_kid;
++		omp_get_schedule(&hl_kid,&hl_m);
++		if(hl_kid==omp_sched_static){
++			std::cout<<"-----hl--static-------";
++		}else if(hl_kid==omp_sched_dynamic){
++			std::cout<<"-----hl--dynamic-------";
++		}else{
++			std::cout<<"-----hl--other-------";
++		}
++		std::cout<<"hl size is "<<hl_m<<std::endl;*/
++	
+         #pragma omp parallel sections 
+                     {
+         #pragma omp section
+                         {
+-        #pragma omp parallel for
++        #pragma omp parallel for schedule(static) 
+                         for(int idx=0; idx <= (int)sub_interval_len; idx++) {
+                                 vid_t vid = sub_interval_st + (randomization ? random_order[idx] : idx);
+                                 svertex_t & v = vertices[vid - sub_interval_st];
+@@ -428,6 +444,17 @@
+                                         userprogram.update(v, chicontext);
+                                 }
+                             }
++                /*int hl_m = 0;
++		omp_sched_t hl_kid=(omp_sched_t)0;
++		omp_get_schedule(&hl_kid,&hl_m);
++		if(hl_kid==omp_sched_static){
++			std::cout<<"-----hl--static-------";
++		}else if(hl_kid==omp_sched_dynamic){
++			std::cout<<"-----hl--dynamic-------";
++		}else{
++			std::cout<<"-----hl--other-------";
++		}
++		std::cout<<"hl size is "<<hl_m<<std::endl;*/
+                         }
+         #pragma omp section
+                         {
+@@ -462,7 +489,7 @@
+          a separate analysis phase to check which vertices can be run in parallel, and
+          then run it in chunks. Not difficult.
+          **/
+-        virtual void exec_updates_inmemory_mode(GraphChiProgram<VertexDataType, EdgeDataType, svertex_t> &userprogram,
++        virtual void exec_updates_inmemory_mode(GraphChiProgram<VertexDataType, EdgeDataType,PreEdgeDataType, svertex_t> &userprogram,
+                                         std::vector<svertex_t> &vertices) {
+             work = nupdates = 0;
+             
+@@ -475,8 +502,9 @@
+                 
+                 if (use_selective_scheduling) {
+                     if (iter > 0 && !scheduler->has_new_tasks) {
+-                        logstream(LOG_INFO) << "No new tasks to run!" << std::endl;
++                        logstream(LOG_INFO) << "No new tasks to run2!" << std::endl;
+                         niters = iter;
++						userprogram.after_iteration(iter, chicontext);
+                         break;
+                     }
+                     scheduler->new_iteration(iter);
+@@ -530,14 +558,14 @@
+         }
+         
+ 
+-        virtual void init_vertices(std::vector<svertex_t> &vertices, graphchi_edge<EdgeDataType> * &edata) {
++        virtual void init_vertices(std::vector<svertex_t> &vertices, graphchi_edge<EdgeDataType,PreEdgeDataType> * &edata) {
+             size_t nvertices = vertices.size();
+             
+             /* Compute number of edges */
+             size_t num_edges = num_edges_subinterval(sub_interval_st, sub_interval_en);
+             
+             /* Allocate edge buffer */
+-            edata = (graphchi_edge<EdgeDataType>*) malloc(num_edges * sizeof(graphchi_edge<EdgeDataType>));
++            edata = (graphchi_edge<EdgeDataType,PreEdgeDataType>*) malloc(num_edges * sizeof(graphchi_edge<EdgeDataType,PreEdgeDataType>));
+             
+             /* Assign vertex edge array pointers */
+             size_t ecounter = 0;
+@@ -715,7 +743,7 @@
+          * parameter. 
+          * @param niters number of iterations
+          */
+-        void run(GraphChiProgram<VertexDataType, EdgeDataType, svertex_t> &userprogram, int _niters) {
++        void run(GraphChiProgram<VertexDataType, EdgeDataType,PreEdgeDataType ,svertex_t> &userprogram, int _niters) {
+             m.start_time("runtime");
+             if (degree_handler == NULL)
+                 degree_handler = create_degree_handler();
+@@ -802,7 +830,9 @@
+                 if (use_selective_scheduling) {
+                     if (scheduler != NULL) {
+                         if (!scheduler->has_new_tasks) {
+-                            logstream(LOG_INFO) << "No new tasks to run!" << std::endl;
++                            logstream(LOG_INFO) << "No new tasks to run1!" << std::endl;
++							niters = iter;
++							userprogram.after_iteration(iter, chicontext);
+                             break;
+                         }
+                         scheduler->has_new_tasks = false; // Kind of misleading since scheduler may still have tasks - but no new tasks.
+@@ -881,7 +911,7 @@
+                         
+                         /* Initialize vertices */
+                         int nvertices = sub_interval_en - sub_interval_st + 1;
+-                        graphchi_edge<EdgeDataType> * edata = NULL;
++                        graphchi_edge<EdgeDataType,PreEdgeDataType> * edata = NULL;
+                         
+                         std::vector<svertex_t> vertices(nvertices, svertex_t());
+                         logstream(LOG_DEBUG) << "Allocation " << nvertices << " vertices, sizeof:" << sizeof(svertex_t)
+diff -urN graphchi-cpp-ori/src/preprocessing/sharder.hpp graphchi-cpp/src/preprocessing/sharder.hpp
+--- graphchi-cpp-ori/src/preprocessing/sharder.hpp	2015-06-03 23:30:59.000000000 +0800
++++ graphchi-cpp/src/preprocessing/sharder.hpp	2015-06-04 07:44:13.000000000 +0800
+@@ -365,6 +365,8 @@
+             m.start_time("preprocessing");
+             numshovels = 0;
+             shovelsize = (1024l * 1024l * size_t(get_option_int("membudget_mb", 1024)) / 4l / sizeof(edge_with_value<EdgeDataType>));
++			std::cout << "in start_preprocessing, sizeof(edge_with_value<EdgeDataType>=" << sizeof(edge_with_value<EdgeDataType>) << std::endl;
++			std::cout << "in start_preprocessing, shovelsize=" << shovelsize << std::endl;
+             curshovel_idx = 0;
+             
+             logstream(LOG_INFO) << "Starting preprocessing, shovel size: " << shovelsize << std::endl;
+@@ -559,9 +561,10 @@
+                 shoveled_edges += shoveltasks[i]->numedges;
+                 delete shoveltasks[i];
+             }
++            logstream(LOG_INFO) << "(Szy debug)in determine_number_of_shards: shoveled_edges = " << shoveled_edges << std::endl;
+             
+             if (nshards_string.find("auto") != std::string::npos || nshards_string == "0") {
+-                logstream(LOG_INFO) << "Determining number of shards automatically." << std::endl;
++                logstream(LOG_INFO) << "Determining number of shards automatically. nshards_string=" << nshards_string << std::endl;
+                 
+                 int membudget_mb = get_option_int("membudget_mb", 1024);
+                 logstream(LOG_INFO) << "Assuming available memory is " << membudget_mb << " megabytes. " << std::endl;
+@@ -636,12 +639,14 @@
+             logstream(LOG_DEBUG) << "Shovel size:" << shovelsize << " edges: " << numedges << std::endl;
+             
+             m.start_time("finish_shard.sort");
++            logstream(LOG_DEBUG) << "finish_shard.sort start"<< std::endl;
+ #ifndef DYNAMICEDATA
+             iSort(shovelbuf, (int)numedges, max_vertex_id, srcF<EdgeDataType>());
+ #else
+             quickSort(shovelbuf, (int)numedges, edge_t_src_less<EdgeDataType>);
+ #endif
+             m.stop_time("finish_shard.sort");
++            logstream(LOG_DEBUG) << "finish_shard.sort stop"<< std::endl;
+ 
+             // Remove duplicates
+             if (duplicate_edge_filter != NULL && numedges > 0) {
+@@ -666,6 +671,7 @@
+                 free(shovelbuf);
+                 shovelbuf = tmpbuf; tmpbuf = NULL;
+             }
++            logstream(LOG_DEBUG) << "finish remove duplication "<< std::endl;
+             
+             // Index file
+             std::string indexfile = filename_shard_adjidx(fname);
+@@ -970,16 +976,20 @@
+             /* Initialize kway merge sources */
+             size_t B = membudget_mb * 1024 * 1024 / 2 / numshovels;
+             while (B % sizeof(edge_with_value<EdgeDataType>) != 0) B++;
+-            logstream(LOG_INFO) << "Buffer size in merge phase: " << B << std::endl;
++            logstream(LOG_INFO) << "Buffer size in merge phase: " << B <<"numshovels: "<< numshovels << std::endl;
+             prevvid = (-1);
+             std::vector< merge_source<edge_with_value<EdgeDataType> > *> sources;
+             for(int i=0; i < numshovels; i++) {
+                 sources.push_back(new shovel_merge_source<EdgeDataType>(B, shovel_filename(i)));
+             }
+             
++			
++            logstream(LOG_INFO) << "after loop" << std::endl;
+             kway_merge<edge_with_value<EdgeDataType> > merger(sources, this);
+             merger.merge();
+             
++			
++            logstream(LOG_INFO) << "after merger" << std::endl;
+             // Delete sources
+             for(int i=0; i < (int)sources.size(); i++) {
+                 delete (shovel_merge_source<EdgeDataType> *)sources[i];
+@@ -1005,6 +1015,7 @@
+                 close(degreeOutF);
+             }
+             
++            logstream(LOG_INFO) << "outof function" << std::endl;
+         }
+         
+         
+@@ -1080,11 +1091,11 @@
+                     /* Preallocate vertices */
+                     metrics_entry men = m.start_time();
+                     int nvertices = subinterval_en - subinterval_st + 1;
+-                    std::vector< graphchi_vertex<int, dummy_t> > vertices(nvertices, graphchi_vertex<int, dummy_t>()); // preallocate
++                    std::vector< graphchi_vertex<int, dummy_t, dummy_t> > vertices(nvertices, graphchi_vertex<int, dummy_t, dummy_t>()); // preallocate
+                     
+                     
+                     for(int i=0; i < nvertices; i++) {
+-                        vertices[i] = graphchi_vertex<int, dummy_t>(subinterval_st + i, NULL, NULL, 0, 0);
++                        vertices[i] = graphchi_vertex<int, dummy_t, dummy_t>(subinterval_st + i, NULL, NULL, 0, 0);
+                         vertices[i].scheduled =  true;
+                     }
+                     
+diff -urN graphchi-cpp-ori/src/shards/memoryshard.hpp graphchi-cpp/src/shards/memoryshard.hpp
+--- graphchi-cpp-ori/src/shards/memoryshard.hpp	2015-06-03 23:30:59.000000000 +0800
++++ graphchi-cpp/src/shards/memoryshard.hpp	2015-06-04 07:44:13.000000000 +0800
+@@ -53,7 +53,7 @@
+     
+     
+     
+-    template <typename VT, typename ET, typename svertex_t = graphchi_vertex<VT, ET> >
++    template <typename VT, typename ET, typename svertex_t = graphchi_vertex<VT, ET, ET> >
+     class memory_shard {
+         
+         stripedio * iomgr;
+@@ -535,4 +535,4 @@
+ };
+ 
+ #endif
+-#endif
+\ No newline at end of file
++#endif
+diff -urN graphchi-cpp-ori/src/shards/slidingshard.hpp graphchi-cpp/src/shards/slidingshard.hpp
+--- graphchi-cpp-ori/src/shards/slidingshard.hpp	2015-06-03 23:30:59.000000000 +0800
++++ graphchi-cpp/src/shards/slidingshard.hpp	2015-06-04 07:44:13.000000000 +0800
+@@ -153,7 +153,7 @@
+      * Graph shard that is streamed. I.e, it can only read in one direction, a chunk
+      * a time.
+      */
+-    template <typename VT, typename ET, typename svertex_t = graphchi_vertex<VT, ET>, typename ETspecial = ET>
++    template <typename VT, typename ET, typename svertex_t = graphchi_vertex<VT, ET, ET>, typename ETspecial = ET>
+     class sliding_shard {
+         
+         stripedio * iomgr;
+@@ -249,7 +249,8 @@
+         void initdata() {
+             logstream(LOG_DEBUG) << "Initialize edge data: " << filename_edata << std::endl;
+             ET * initblock = (ET *) malloc(blocksize);
+-            for(int i=0; i < (int) (blocksize/sizeof(ET)); i++) initblock[i] = ET();
++			/* hl code */
++            for(int i=0; i < (int) (blocksize/sizeof(ET)); i++) initblock[i].store(0.0,std::memory_order_relaxed);
+             for(size_t off=0; off < edatafilesize; off += blocksize) {
+                 std::string blockfilename = filename_shard_edata_block(filename_edata, (int) (off / blocksize), blocksize);
+                 size_t len = std::min(blocksize, edatafilesize - off);
+diff -urN graphchi-cpp-ori/src/util/pthread_tools.hpp graphchi-cpp/src/util/pthread_tools.hpp
+--- graphchi-cpp-ori/src/util/pthread_tools.hpp	2015-06-03 23:30:59.000000000 +0800
++++ graphchi-cpp/src/util/pthread_tools.hpp	2015-06-04 07:44:13.000000000 +0800
+@@ -6,13 +6,14 @@
+ #include <cstdlib>
+ #include <memory.h>
+ #include <pthread.h>
++#include <semaphore.h>
+ #include <sched.h>
+ #include <signal.h>
+ #include <sys/time.h>
+ #include <vector>
+ #include <cassert>
+ #include <list>
+-#include <iostream>
++#include <iostream> 
+ 
+ #undef _POSIX_SPIN_LOCKS
+ #define _POSIX_SPIN_LOCKS -1
+@@ -24,12 +25,12 @@
+  * \file pthread_tools.hpp A collection of utilities for threading
+  */
+ namespace graphchi {
+-
+-
+-
++    
++    
++    
+     /**
+-     * \class mutex
+-     *
++     * \class mutex 
++     * 
+      * Wrapper around pthread's mutex On single core systems mutex
+      * should be used.  On multicore systems, spinlock should be used.
+      */
+@@ -61,14 +62,14 @@
+         }
+         friend class conditional;
+     }; // End of Mutex
+-
++    
+ #if _POSIX_SPIN_LOCKS >= 0
+     // We should change this to use a test for posix_spin_locks eventually
+-
++    
+     // #ifdef __linux__
+     /**
+      * \class spinlock
+-     *
++     * 
+      * Wrapper around pthread's spinlock On single core systems mutex
+      * should be used.  On multicore systems, spinlock should be used.
+      * If pthread_spinlock is not available, the spinlock will be
+@@ -83,8 +84,8 @@
+             int error = pthread_spin_init(&m_spin, PTHREAD_PROCESS_PRIVATE);
+             assert(!error);
+         }
+-
+-        inline void lock() const {
++        
++        inline void lock() const { 
+             int error = pthread_spin_lock( &m_spin  );
+             assert(!error);
+         }
+@@ -107,8 +108,8 @@
+     typedef mutex spinlock;
+ #define SPINLOCK_SUPPORTED 0
+ #endif
+-
+-
++    
++    
+     /**
+      * \class conditional
+      * Wrapper around pthread's condition variable
+@@ -147,15 +148,40 @@
+             assert(!error);
+         }
+     }; // End conditional
+-
+-
+-
+-
+-
++    
++    /**
++     * \class semaphore
++     * Wrapper around pthread's semaphore
++     */
++    class semaphore {
++    private:
++        mutable sem_t  m_sem;
++    public:
++        semaphore() {
++            int error = sem_init(&m_sem, 0,0);
++            assert(!error);
++        }
++        inline void post() const {
++            int error = sem_post(&m_sem);
++            assert(!error);
++        }
++        inline void wait() const {
++            int error = sem_wait(&m_sem);
++            assert(!error);
++        }
++        ~semaphore() {
++            int error = sem_destroy(&m_sem);
++            assert(!error);
++        }
++    }; // End semaphore
++    
++         
++    
++    
+ #define atomic_xadd(P, V) __sync_fetch_and_add((P), (V))
+ #define cmpxchg(P, O, N) __sync_val_compare_and_swap((P), (O), (N))
+ #define atomic_inc(P) __sync_add_and_fetch((P), 1)
+-
++    
+     /**
+      * \class spinrwlock
+      * rwlock built around "spinning"
+@@ -164,7 +190,7 @@
+      * John Mellor-Crummey and Michael Scott
+      */
+     class spinrwlock {
+-
++        
+         union rwticket {
+             unsigned u;
+             unsigned short us;
+@@ -183,45 +209,45 @@
+         inline void writelock() const {
+             unsigned me = atomic_xadd(&l.u, (1<<16));
+             unsigned char val = me >> 16;
+-
++            
+             while (val != l.s.write) sched_yield();
+             writing = true;
+         }
+-
++        
+         inline void wrunlock() const{
+             rwticket t = *const_cast<rwticket*>(&l);
+-
++            
+             t.s.write++;
+             t.s.read++;
+-
++            
+             *(volatile unsigned short *) (&l) = t.us;
+             writing = false;
+             __asm("mfence");
+         }
+-
++        
+         inline void readlock() const {
+             unsigned me = atomic_xadd(&l.u, (1<<16));
+             unsigned char val = me >> 16;
+-
++            
+             while (val != l.s.read) sched_yield();
+             l.s.read++;
+         }
+-
++        
+         inline void rdunlock() const {
+             atomic_inc(&l.s.write);
+         }
+-
++        
+         inline void unlock() const {
+             if (!writing) rdunlock();
+             else wrunlock();
+         }
+     };
+-
++    
+ #undef atomic_xadd
+ #undef cmpxchg
+ #undef atomic_inc
+-
+-
++    
++    
+     /**
+      * \class rwlock
+      * Wrapper around pthread's rwlock
+@@ -257,7 +283,7 @@
+             unlock();
+         }
+     }; // End rwlock
+-
++    
+     /**
+      * \class barrier
+      * Wrapper around pthread's barrier
+@@ -275,7 +301,7 @@
+         ~barrier() { pthread_barrier_destroy(&m_barrier); }
+         inline void wait() const { pthread_barrier_wait(&m_barrier); }
+     };
+-
++    
+ #else
+     /**
+      * \class barrier
+@@ -287,32 +313,32 @@
+         int needed;
+         int called;
+         conditional c;
+-
++        
+         // we need the following to protect against spurious wakeups
+         std::vector<unsigned char> waiting;
+     public:
+-
++        
+         barrier(size_t numthreads) {
+             needed = (int)numthreads;
+             called = 0;
+             waiting.resize(numthreads);
+             std::fill(waiting.begin(), waiting.end(), 0);
+         }
+-
++        
+         ~barrier() {}
+-
+-
++        
++        
+         inline void wait() {
+             m.lock();
+             // set waiting;
+             size_t myid = called;
+             waiting[myid] = 1;
+             called++;
+-
++            
+             if (called == needed) {
+                 // if I have reached the required limit, wait up. Set waiting
+                 // to 0 to make sure everyone wakes up
+-
++                
+                 called = 0;
+                 // clear all waiting
+                 std::fill(waiting.begin(), waiting.end(), 0);
+@@ -326,23 +352,23 @@
+         }
+     };
+ #endif
+-
+-
+-
++    
++    
++    
+     inline void prefetch_range(void *addr, size_t len) {
+         char *cp;
+         char *end = (char*)(addr) + len;
+-
+-        for (cp = (char*)(addr); cp < end; cp += 64) __builtin_prefetch(cp, 0);
++        
++        for (cp = (char*)(addr); cp < end; cp += 64) __builtin_prefetch(cp, 0); 
+     }
+     inline void prefetch_range_write(void *addr, size_t len) {
+         char *cp;
+         char *end = (char*)(addr) + len;
+-
++        
+         for (cp = (char*)(addr); cp < end; cp += 64) __builtin_prefetch(cp, 1);
+     }
+-
+-
+-};
++    
++    
++}; 
+ #endif
+ 
+diff -urN graphchi-cpp-ori/src/util/radixSort.hpp graphchi-cpp/src/util/radixSort.hpp
+--- graphchi-cpp-ori/src/util/radixSort.hpp	2015-06-03 23:30:59.000000000 +0800
++++ graphchi-cpp/src/util/radixSort.hpp	2015-06-04 07:44:13.000000000 +0800
+@@ -87,10 +87,13 @@
+         intT bits = log2Up(m);
+         
+         // temporary space
++	std::cout<<"E_size "<<sizeof(E)<<" n "<<n<<" bIndexT_size "<<sizeof(bIndexT)<<std::endl;
+         E* B = (E*) malloc(sizeof(E)*n);
+         bIndexT* Tmp = (bIndexT*) malloc(sizeof(bIndexT)*n);
+         intT* counts = (intT*) malloc(sizeof(intT)*BUCKETS);
+         
++	std::cout<<"sort begin"<<std::endl;
++
+         intT rounds = 1+(bits-1)/MAX_RADIX;
+         intT rbits = 1+(bits-1)/rounds;
+         intT bitOffset = 0;
+@@ -112,6 +115,7 @@
+             for (intT i=0; i < n; i++)
+                 A[i] = B[i];
+         
++	std::cout<<"sort end"<<std::endl;
+         free(B); free(Tmp); free(counts);
+     }
+ }
+diff -urN graphchi-cpp-ori/src/util/toplist.hpp graphchi-cpp/src/util/toplist.hpp
+--- graphchi-cpp-ori/src/util/toplist.hpp	2015-06-03 23:30:59.000000000 +0800
++++ graphchi-cpp/src/util/toplist.hpp	2015-06-04 07:44:13.000000000 +0800
+@@ -33,6 +33,7 @@
+ #include <algorithm>
+ #include <errno.h>
+ #include <assert.h>
++#include <cmath>
+ 
+ #include "io/stripedio.hpp"
+ #include "logger/logger.hpp"
